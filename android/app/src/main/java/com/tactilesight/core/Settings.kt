@@ -49,6 +49,27 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_BAND_ADDRESS, DEFAULT_BAND_ADDRESS).orEmpty()
         set(value) = prefs.edit().putString(KEY_BAND_ADDRESS, value.trim()).apply()
 
+    /**
+     * The cloud tier: any OpenAI-compatible vision endpoint, on the user's own
+     * key. This is what lets someone with no band and no sideloaded model use
+     * the app at all — a stranger's phone has neither.
+     *
+     * The key is the user's, typed into the app and kept in private app
+     * storage. It is never compiled into the APK: this one is meant to be
+     * handed to people, and anything baked in is extractable by all of them.
+     */
+    var cloudApiUrl: String
+        get() = prefs.getString(KEY_CLOUD_URL, DEFAULT_CLOUD_URL).orEmpty()
+        set(value) = prefs.edit().putString(KEY_CLOUD_URL, value.trim()).apply()
+
+    var cloudApiModel: String
+        get() = prefs.getString(KEY_CLOUD_MODEL, DEFAULT_CLOUD_MODEL).orEmpty()
+        set(value) = prefs.edit().putString(KEY_CLOUD_MODEL, value.trim()).apply()
+
+    var cloudApiKey: String
+        get() = prefs.getString(KEY_CLOUD_KEY, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_CLOUD_KEY, value.trim()).apply()
+
     /** Which model the private server should run, when it is OpenAI-style. */
     var privateServerModel: String
         get() = prefs.getString(KEY_PRIVATE_MODEL, "").orEmpty()
@@ -91,26 +112,28 @@ class Settings(context: Context) {
     /**
      * Whether the developer controls are on screen.
      *
-     * Defaults to **on**: this screen exists to develop and demonstrate the
-     * band, and a build that hid its own engine picker by default would cost
-     * more time at the venue than it saved.
+     * Defaults to **off** now that the APK is handed to people who have never
+     * seen the band: what they need is the camera, the button and the setup
+     * controls, not an engine picker. Developers flip it on once and it sticks.
      *
      * Persisted so a demo does not have to be re-tidied after every launch —
      * ColorOS kills this app aggressively, and re-hiding the panel in front of
      * an audience is the fumble the switch exists to prevent.
      */
     var devMode: Boolean
-        get() = prefs.getBoolean(KEY_DEV_MODE, true)
+        get() = prefs.getBoolean(KEY_DEV_MODE, false)
         set(value) = prefs.edit().putBoolean(KEY_DEV_MODE, value).apply()
 
     fun urlFor(mode: BrainMode): String = when (mode) {
         BrainMode.PRIVATE_SERVER -> privateServerUrl
+        BrainMode.CLOUD_API -> cloudApiUrl
         BrainMode.ON_DEVICE_NPU -> ""
     }
 
     fun setUrlFor(mode: BrainMode, url: String) {
         when (mode) {
             BrainMode.PRIVATE_SERVER -> privateServerUrl = url
+            BrainMode.CLOUD_API -> cloudApiUrl = url
             BrainMode.ON_DEVICE_NPU -> Unit
         }
     }
@@ -126,6 +149,17 @@ class Settings(context: Context) {
         const val KEY_PRIVATE_MODEL = "private_server_model"
         const val KEY_DEV_MODE = "dev_mode"
         const val KEY_BAND_ADDRESS = "band_address"
+        const val KEY_CLOUD_URL = "cloud_api_url"
+        const val KEY_CLOUD_MODEL = "cloud_api_model"
+        const val KEY_CLOUD_KEY = "cloud_api_key"
+
+        /**
+         * OpenAI by default because it is the key people most often already
+         * hold. Any OpenAI-compatible endpoint works — Gemini's
+         * `…/v1beta/openai`, OpenRouter, a local LM Studio.
+         */
+        const val DEFAULT_CLOUD_URL = "https://api.openai.com/v1"
+        const val DEFAULT_CLOUD_MODEL = "gpt-4o-mini"
 
         /** The board's current DHCP lease. Overridden the moment it moves. */
         const val DEFAULT_BAND_ADDRESS = "10.89.1.1"
@@ -133,6 +167,5 @@ class Settings(context: Context) {
         /** The laptop tier's default port, per server/README. */
         const val DEFAULT_PRIVATE_URL = "http://192.168.1.100:8000"
 
-        /** Cirrascale's published Imagine API endpoint. */
     }
 }

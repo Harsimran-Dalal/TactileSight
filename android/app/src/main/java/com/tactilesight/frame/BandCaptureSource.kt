@@ -173,8 +173,8 @@ class BandCaptureSource(
     private fun decode(base64: String): ByteArray =
         if (base64.isBlank()) ByteArray(0) else Base64.decode(base64, Base64.DEFAULT)
 
-    private companion object {
-        const val TAG = "BandCaptureSource"
+    companion object {
+        private const val TAG = "BandCaptureSource"
         const val HTTP_PORT = 8081
         const val WEBSOCKET_PORT = 8083
 

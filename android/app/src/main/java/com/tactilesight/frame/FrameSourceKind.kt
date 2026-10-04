@@ -23,6 +23,13 @@ enum class FrameSourceKind(
      */
     val measuresDistance: Boolean,
 ) {
+    /**
+     * What user mode runs: the band when it answers, the phone camera when it
+     * does not — see [AutoFrameSource]. Distance is per frame, so this claims
+     * what the band can do and `Frame.hasDepth` settles each press.
+     */
+    AUTO("Automatic — band if connected", available = true, measuresDistance = true),
+
     BUNDLED("Bundled captures", available = true, measuresDistance = true),
 
     /**

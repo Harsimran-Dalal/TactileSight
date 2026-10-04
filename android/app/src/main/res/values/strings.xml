@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">TactileSight</string>
-    <string name="subtitle">Walking skeleton · bundled band captures</string>
+    <string name="subtitle">Developer controls</string>
 
     <string name="mode_dev_label">Dev</string>
     <string name="mode_on_content_description">Developer controls shown. Switch off for user mode.</string>
@@ -21,6 +21,34 @@
     <string name="brain_private_server">☁️ Private server</string>
     <string name="brain_on_device_content_description">Describing on this phone. The frame does not leave it. Switch on to use the private server.</string>
     <string name="brain_private_server_content_description">Describing on the private server. The frame leaves this phone. Switch off to describe on the phone.</string>
+
+    <string-array name="brain_choices">
+        <item>🔒 On this phone</item>
+        <item>☁️ Cloud — your API key</item>
+        <item>🖥️ Private server</item>
+    </string-array>
+    <string name="brain_cloud_content_description">Describing with a cloud model on your own API key. The frame leaves this phone.</string>
+
+    <string name="download_model">Download offline model (1.5 GB)</string>
+    <string name="download_running">Downloading… %1$d%% of %2$s GB. You can keep using the app.</string>
+    <string name="download_failed">Download stopped: %s. Tap to resume.</string>
+    <string name="download_done">Offline model ready.</string>
+    <string name="download_wifi_hint">Runs offline once downloaded. Use WiFi.</string>
+
+    <string name="hint_cloud_key">API key (OpenAI-compatible)</string>
+    <string name="hint_cloud_url">API base URL, e.g. https://api.openai.com/v1</string>
+    <string name="hint_cloud_model">Vision model, e.g. gpt-4o-mini</string>
+
+    <string name="source_band">📡 Band connected — distances on</string>
+    <string name="source_phone">📷 Phone camera — no distances</string>
+    <string name="spoken_band_connected">Band connected. I can measure distance now.</string>
+    <string name="spoken_band_lost">Band disconnected. Using the phone camera.</string>
+
+    <!-- Spoken by NotSetUpBrain instead of an invented scene. -->
+    <string name="speak_no_model">No scene model on this phone yet. Open the app, then download the offline model or add a cloud API key.</string>
+    <string name="speak_no_key">The cloud needs an API key. Open the app and type one in.</string>
+    <string name="speak_no_server">No private server address is set.</string>
+    <string name="model_not_set_up">Not set up — download the offline model or add a cloud API key.</string>
 
     <string name="label_camera">Camera</string>
     <string name="camera_no_distance">Phone camera — I can describe what is around you, but not measure how far away it is.</string>
@@ -73,7 +101,7 @@
     <string name="status_busy">Still working on the last one…</string>
     <string name="status_speech_failed">Could not speak — check the network connection.</string>
     <string name="status_brain">Ready · %s</string>
-    <string name="status_no_key">No Sarvam API key. Add sarvam.api.key to android/local.properties.</string>
+    <string name="status_no_key">No Sarvam key in this build — speaking English with the phone\'s own voice.</string>
     <string name="source_unavailable">%s is not built yet.</string>
     <string name="capture_label">Capture %1$d of %2$d</string>
 </resources>

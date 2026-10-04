@@ -20,6 +20,7 @@ class BrainModeTest {
     fun `only on-device keeps imagery on the phone`() {
         assertFalse(BrainMode.ON_DEVICE_NPU.sendsImageryOffDevice)
         assertTrue(BrainMode.PRIVATE_SERVER.sendsImageryOffDevice)
+        assertTrue(BrainMode.CLOUD_API.sendsImageryOffDevice)
     }
 
     @Test

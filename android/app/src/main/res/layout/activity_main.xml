@@ -84,23 +84,93 @@
             android:textSize="12sp" />
     </LinearLayout>
 
-    <!-- Where the frame goes, in both modes. Two destinations, so a switch
-         rather than a dropdown - a dropdown makes you tap twice and read a
-         list to answer a yes/no question.
+    <!-- Where the frame goes, in both modes. Three destinations now, so a
+         spinner: on this phone, a hosted model on the user's own key, or our
+         laptop. Each entry names where the frame goes, which is the part with
+         consequences. -->
+    <Spinner
+        android:id="@+id/brainSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:contentDescription="@string/label_brain" />
 
-         Two words on its face and the whole sentence on its content
-         description: a sighted user needs a glance, and a blind one hears
-         "On this phone. The frame stays on this phone." either way. The lock
-         and the cloud are readable before the words are. -->
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/brainSwitch"
+    <!-- On-device with nothing staged: fetch a model rather than sideload one.
+         A stranger's phone has no adb and no QAIRT bundle for its SoC. -->
+    <Button
+        android:id="@+id/downloadButton"
+        style="?android:attr/borderlessButtonStyle"
         android:layout_width="wrap_content"
-        android:layout_height="48dp"
+        android:layout_height="wrap_content"
+        android:minWidth="0dp"
+        android:paddingHorizontal="8dp"
+        android:text="@string/download_model"
+        android:textColor="@color/qualcomm_blue"
+        android:textSize="14sp" />
+
+    <TextView
+        android:id="@+id/downloadStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:textColor="@color/on_surface_muted"
+        android:textSize="13sp" />
+
+    <!-- Cloud only. The key is the user's own and is typed here; nothing is
+         compiled into this APK, because this APK is handed to people. -->
+    <LinearLayout
+        android:id="@+id/cloudPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:orientation="vertical">
+
+        <EditText
+            android:id="@+id/cloudKeyField"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_cloud_key"
+            android:importantForAutofill="no"
+            android:inputType="textPassword"
+            android:maxLines="1"
+            android:textColor="@color/on_surface"
+            android:textColorHint="@color/on_surface_muted"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/cloudUrlField"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_cloud_url"
+            android:importantForAutofill="no"
+            android:inputType="textUri"
+            android:maxLines="1"
+            android:textColor="@color/on_surface"
+            android:textColorHint="@color/on_surface_muted"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/cloudModelField"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_cloud_model"
+            android:importantForAutofill="no"
+            android:inputType="text"
+            android:maxLines="1"
+            android:textColor="@color/on_surface"
+            android:textColorHint="@color/on_surface_muted"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <!-- Which camera the next press will use. In user mode this is automatic:
+         the band when it answers on the network, the phone otherwise. -->
+    <TextView
+        android:id="@+id/sourceStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
         android:layout_marginBottom="12dp"
-        android:gravity="center_vertical"
-        android:text="@string/brain_on_device"
-        android:textColor="@color/on_surface"
-        android:textSize="15sp" />
+        android:textColor="@color/on_surface_muted"
+        android:textSize="13sp" />
 
     <!-- Everything a user must never have to see or understand: which engine
          answers, where it lives, and what it is asked. One container so the
@@ -112,11 +182,10 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-    <!-- Dev only. User mode does not choose a camera: it uses the band's own
-         live stream, which is the only source a real user has. Bundled
-         captures are a development scaffold and the phone camera is the
-         standalone fallback, and neither is something to put in front of
-         someone who cannot see the spinner they are being asked to set. -->
+    <!-- Dev only. User mode does not choose a camera: it uses the band when
+         one answers and the phone camera otherwise (Automatic). Bundled
+         captures are a development scaffold, and none of this is something to
+         put in front of someone who cannot see the spinner. -->
     <TextView
         android:id="@+id/cameraLabel"
         style="@style/TextAppearance.TactileSight.Label"

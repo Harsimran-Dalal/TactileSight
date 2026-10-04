@@ -19,11 +19,14 @@ import android.widget.Spinner
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.viewpager2.widget.ViewPager2
 import com.geniex.sdk.bean.ComputeUnitValue
 import com.geniex.sdk.bean.RuntimeIdValue
 import com.tactilesight.brain.GenieXBrain
+import com.tactilesight.brain.ModelDownloader
 import com.tactilesight.brain.ModelStore
 import com.tactilesight.brain.PromptBenchmark
 import com.tactilesight.brain.ServerCheck
@@ -35,7 +38,9 @@ import com.tactilesight.core.FrameSource
 import com.tactilesight.core.Language
 import com.tactilesight.core.Orchestrator
 import com.tactilesight.databinding.ActivityMainBinding
+import com.tactilesight.frame.AutoFrameSource
 import com.tactilesight.frame.BandCaptureSource
+import com.tactilesight.frame.BandProbe
 import com.tactilesight.frame.BundledCaptureSource
 import com.tactilesight.frame.DepthCoverage
 import com.tactilesight.frame.DepthRenderer
@@ -48,7 +53,9 @@ import com.tactilesight.frame.FrameSourceKind
 import com.tactilesight.nfc.BandTag
 import com.tactilesight.frame.ObjectDetector
 import com.tactilesight.frame.PhoneCameraSource
+import com.tactilesight.speech.AndroidSpeechIO
 import com.tactilesight.speech.MicRecorder
+import com.tactilesight.speech.RoutingSpeechIO
 import com.tactilesight.speech.SarvamAsr
 import com.tactilesight.speech.SarvamSpeechIO
 import com.tactilesight.speech.SpokenSetup
@@ -60,8 +67,9 @@ import java.io.File
  * The walking skeleton (#1): pick a bundled band capture, press, hear a
  * sentence.
  *
- * There is no phone camera in this app — frames are real Astra Pro Plus
- * captures. The band has three physical buttons (ADR-0011); until the band is
+ * User mode needs nothing but the phone: frames come from the band when one
+ * answers on the network and from the phone camera otherwise
+ * ([AutoFrameSource]). The band has three physical buttons (ADR-0011); until the band is
  * wired, this screen carries button 1 only — on glass, and on the phone's
  * volume-up key so the phone can stay in a pocket (see [onKeyDown], and its
  * foreground-only limitation). Buttons 2 and 3 arrive with #17, the engine
@@ -90,11 +98,31 @@ class MainActivity : AppCompatActivity() {
     private val band by lazy {
         BandCaptureSource { (application as TactileSightApp).settings.bandAddress }
     }
+    /** What user mode runs on — see [AutoFrameSource]. */
+    private val auto by lazy { AutoFrameSource(band, phoneCamera) { bandConnected } }
+
+    /** Last result of [BandProbe]. Read per press by [auto]. */
+    @Volatile
+    private var bandConnected = false
+
+    /** Which entry of the camera picker [frames] currently is. */
+    private var sourceKind = FrameSourceKind.BUNDLED
+
     private lateinit var orchestrator: Orchestrator
     private val recorder = MicRecorder()
     private val detector by lazy { ObjectDetector(applicationContext) }
     private val asr = SarvamAsr()
-    private val speech by lazy { SarvamSpeechIO(cacheDir) }
+    private val onDeviceSpeech by lazy { AndroidSpeechIO(this) }
+
+    /**
+     * English on-device, Indic via Sarvam.
+     *
+     * One instance, shared with the orchestrator below. It used to be built
+     * twice — harmless for a stateless HTTP client, not for this one: two
+     * [AndroidSpeechIO]s mean two `TextToSpeech` engines competing for the
+     * audio output, and whichever spoke second would cut off the first.
+     */
+    private val speech by lazy { RoutingSpeechIO(onDeviceSpeech, SarvamSpeechIO(cacheDir)) }
     private val setup by lazy { SpokenSetup(speech, recorder, asr) }
 
     /** The scene captured at press-down, answered about at release (#9). */
@@ -132,7 +160,7 @@ class MainActivity : AppCompatActivity() {
             frames = { frames },
             // Owned by the Application, so rotation never drops the model.
             brain = { (application as TactileSightApp).brain },
-            speech = SarvamSpeechIO(cacheDir),
+            speech = speech,
             // Named objects get their own distance; everything else falls back
             // to the per-direction reading. Constructed once - the interpreter
             // maps a 10 MB model and must not be rebuilt per press.
@@ -148,6 +176,8 @@ class MainActivity : AppCompatActivity() {
         setUpLanguagePicker()
         setUpScenePicker()
         setUpModeSwitch()
+        watchForBand()
+        watchModelDownload()
 
         if (BuildConfig.SARVAM_API_KEY.isBlank()) {
             binding.status.setText(R.string.status_no_key)
@@ -288,6 +318,18 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         BandTag.stopWriting(this)
+    }
+
+    /**
+     * Release the TTS engine.
+     *
+     * `TextToSpeech` holds a binding to a separate engine process; dropping the
+     * activity without shutting it down leaks that binding and, on rotation,
+     * accumulates one per recreation until the engine stops answering.
+     */
+    override fun onDestroy() {
+        onDeviceSpeech.shutdown()
+        super.onDestroy()
     }
 
     /**
@@ -725,20 +767,25 @@ class MainActivity : AppCompatActivity() {
     private fun setUpBrainPicker() {
         val app = application as TactileSightApp
 
-        // Two destinations, so a switch rather than a dropdown - and the
-        // switch is labelled with where the frame *goes*, which is the part
-        // with consequences, rather than with the name of an engine.
-        binding.brainSwitch.isChecked = app.settings.mode.sendsImageryOffDevice
+        // Three destinations, in BrainMode order. Each entry names where the
+        // frame goes, which is the part with consequences.
+        val modes = BrainMode.entries
+        binding.brainSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            resources.getStringArray(R.array.brain_choices),
+        )
+        binding.brainSpinner.setSelection(modes.indexOf(app.settings.mode), false)
         showDestination(app.settings.mode)
 
-        binding.brainSwitch.setOnCheckedChangeListener { _, offDevice ->
-            val requested =
-                if (offDevice) BrainMode.PRIVATE_SERVER else BrainMode.ON_DEVICE_NPU
+        binding.brainSpinner.onSelect { position ->
+            val requested = modes[position]
+            if (requested == app.settings.mode) return@onSelect
             app.applyMode(requested)
             showEndpointFor(app.settings.mode)
             showDestination(app.settings.mode)
 
-            if (requested.sendsImageryOffDevice && app.settings.urlFor(requested).isBlank()) {
+            if (requested == BrainMode.PRIVATE_SERVER && app.settings.urlFor(requested).isBlank()) {
                 toast(getString(R.string.endpoint_missing))
             }
             // A new brain is a new object, so the token listener has to be
@@ -746,14 +793,39 @@ class MainActivity : AppCompatActivity() {
             // sentence appearing and looks like the streaming broke.
             streamToScreen()
             warmUpModel()
-            showBrain()
         }
+
+        binding.cloudKeyField.setText(app.settings.cloudApiKey)
+        binding.cloudUrlField.setText(app.settings.cloudApiUrl)
+        binding.cloudModelField.setText(app.settings.cloudApiModel)
+        // Saved per keystroke, like the server address; applyMode only
+        // rebuilds when the configuration actually changed.
+        val onCloudEdited = {
+            if (app.settings.mode == BrainMode.CLOUD_API) {
+                app.applyMode(BrainMode.CLOUD_API)
+                warmUpModel()
+            }
+        }
+        binding.cloudKeyField.doAfterTextChanged {
+            app.settings.cloudApiKey = it?.toString().orEmpty()
+            onCloudEdited()
+        }
+        binding.cloudUrlField.doAfterTextChanged {
+            app.settings.cloudApiUrl = it?.toString().orEmpty()
+            onCloudEdited()
+        }
+        binding.cloudModelField.doAfterTextChanged {
+            app.settings.cloudApiModel = it?.toString().orEmpty()
+            onCloudEdited()
+        }
+
+        binding.downloadButton.setOnClickListener { app.downloadModel() }
 
         // The address is saved as it is typed, so a tunnel URL survives the
         // app being killed — which ColorOS does aggressively.
         binding.endpointField.doAfterTextChanged { text ->
             val mode = app.settings.mode
-            if (mode.sendsImageryOffDevice) {
+            if (mode == BrainMode.PRIVATE_SERVER) {
                 app.settings.setUrlFor(mode, text?.toString().orEmpty())
                 app.applyMode(mode)
                 showBrain()
@@ -905,17 +977,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun showEndpointFor(mode: BrainMode) {
         val app = application as TactileSightApp
-        binding.endpointField.visibility =
-            if (mode.sendsImageryOffDevice) View.VISIBLE else View.GONE
-        binding.checkServerButton.visibility =
-            if (mode.sendsImageryOffDevice) View.VISIBLE else View.GONE
-        // Only the cloud needs a model named: the private server picks its own
-        // via TS_VLM_BACKEND, and on-device uses whatever is staged.
-        // Both server modes need a model named; on-device uses what is staged.
-        binding.modelField.visibility =
-            if (mode.sendsImageryOffDevice) View.VISIBLE else View.GONE
+        val server = if (mode == BrainMode.PRIVATE_SERVER) View.VISIBLE else View.GONE
+        binding.endpointField.visibility = server
+        binding.checkServerButton.visibility = server
+        // The private server names its model here; on-device uses what is
+        // staged, and the cloud has its own field in the cloud panel.
+        binding.modelField.visibility = server
+        binding.cloudPanel.visibility =
+            if (mode == BrainMode.CLOUD_API) View.VISIBLE else View.GONE
+        showDownload()
 
-        val savedUrl = app.settings.urlFor(mode)
+        val savedUrl = app.settings.privateServerUrl
         if (binding.endpointField.text.toString() != savedUrl) {
             binding.endpointField.setText(savedUrl)
         }
@@ -940,6 +1012,50 @@ class MainActivity : AppCompatActivity() {
             TactileSightApp.ModelState.LOADING -> getString(R.string.model_loading)
             TactileSightApp.ModelState.READY -> getString(R.string.status_brain, app.brain.name)
             TactileSightApp.ModelState.FAILED -> getString(R.string.model_failed)
+            TactileSightApp.ModelState.NOT_SET_UP -> getString(R.string.model_not_set_up)
+        }
+        showDownload()
+    }
+
+    /**
+     * The download control, shown only where it can help: on-device chosen and
+     * nothing staged, or a download already under way.
+     */
+    private fun showDownload(state: ModelDownloader.State = (application as TactileSightApp).downloader.state.value) {
+        val app = application as TactileSightApp
+        val running = state is ModelDownloader.State.Running
+        val wanted = app.settings.mode == BrainMode.ON_DEVICE_NPU && !app.hasOnDeviceModel()
+        binding.downloadButton.visibility = if (wanted && !running) View.VISIBLE else View.GONE
+        binding.downloadStatus.visibility = if (wanted || running) View.VISIBLE else View.GONE
+        binding.downloadStatus.text = when (state) {
+            is ModelDownloader.State.Running -> getString(
+                R.string.download_running,
+                (state.doneBytes * 100 / state.totalBytes.coerceAtLeast(1)).toInt(),
+                "%.1f".format(state.totalBytes / 1e9),
+            )
+            is ModelDownloader.State.Failed -> getString(R.string.download_failed, state.reason)
+            ModelDownloader.State.Done -> getString(R.string.download_done)
+            ModelDownloader.State.Idle -> getString(R.string.download_wifi_hint)
+        }
+    }
+
+    private fun watchModelDownload() {
+        val app = application as TactileSightApp
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.downloader.state.collect { showDownload(it) }
+            }
+        }
+        // The brain object is replaced when a download lands; re-attach the
+        // token listener and redraw, or the screen keeps saying "not set up".
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                app.brainRebuilt.collect { version ->
+                    if (version == 0) return@collect
+                    streamToScreen()
+                    if (!hasAnswered) showBrain()
+                }
+            }
         }
     }
 
@@ -952,13 +1068,12 @@ class MainActivity : AppCompatActivity() {
      * rather than by knowing what the words mean.
      */
     private fun showDestination(mode: BrainMode) {
-        binding.brainSwitch.setText(
-            if (mode.sendsImageryOffDevice) R.string.brain_private_server
-            else R.string.brain_on_device,
-        )
-        binding.brainSwitch.contentDescription = getString(
-            if (mode.sendsImageryOffDevice) R.string.brain_private_server_content_description
-            else R.string.brain_on_device_content_description,
+        binding.brainSpinner.contentDescription = getString(
+            when (mode) {
+                BrainMode.ON_DEVICE_NPU -> R.string.brain_on_device_content_description
+                BrainMode.CLOUD_API -> R.string.brain_cloud_content_description
+                BrainMode.PRIVATE_SERVER -> R.string.brain_private_server_content_description
+            },
         )
     }
 
@@ -977,6 +1092,8 @@ class MainActivity : AppCompatActivity() {
             android.R.layout.simple_spinner_dropdown_item,
             kinds.map { if (it.available) it.displayName else "${it.displayName} — not yet" },
         )
+        // Match what [frames] starts as; the first entry is no longer it.
+        binding.cameraSpinner.setSelection(kinds.indexOf(FrameSourceKind.BUNDLED), false)
 
         binding.cameraSpinner.onSelect { position ->
             val kind = kinds[position]
@@ -1004,12 +1121,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * User mode does not pick a camera — it uses the band.
-     *
-     * The band's live stream is the only source a real user has: bundled
-     * captures are a development scaffold and the phone camera is the
-     * standalone fallback. So entering user mode selects the live source rather
-     * than leaving the choice on screen.
+     * User mode does not pick a camera — it runs [FrameSourceKind.AUTO]: the
+     * band when one answers, the phone camera when not. Bundled captures are a
+     * development scaffold. So entering user mode selects the live source
+     * rather than leaving the choice on screen.
      *
      * The guard below is kept now that the source exists, because "available"
      * is still the honest place to switch it off — and falling back silently to
@@ -1017,17 +1132,35 @@ class MainActivity : AppCompatActivity() {
      * photograph from yesterday.
      */
     private fun preferLiveBand() {
-        val live = FrameSourceKind.BAND
+        val live = FrameSourceKind.AUTO
         if (!live.available) {
             Log.i(TAG, "user mode: ${live.displayName} unavailable — staying on the selected source")
             return
         }
-        binding.cameraSpinner.setSelection(live.ordinal)
-        selectSource(live)
+        binding.cameraSpinner.setSelection(live.ordinal, false)
+        if (sourceKind != live) selectSource(live)
     }
 
     private fun selectSource(kind: FrameSourceKind) {
         when (kind) {
+            FrameSourceKind.AUTO -> {
+                frames = auto
+                // Without the camera the band still works; ask, and bind once
+                // granted (onRequestPermissionsResult).
+                if (hasCameraPermission()) {
+                    lifecycleScope.launch {
+                        try {
+                            phoneCamera.start()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "camera would not start", e)
+                        }
+                    }
+                } else {
+                    requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
+                }
+                showBrain()
+            }
+
             FrameSourceKind.PHONE_CAMERA -> {
                 if (!hasCameraPermission()) {
                     requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
@@ -1076,9 +1209,70 @@ class MainActivity : AppCompatActivity() {
                 showBrain()
             }
         }
+        sourceKind = kind
         setUpScenePicker()
         showBandAddress(kind)
+        showSource()
         Log.i(TAG, "frame source = $kind")
+    }
+
+    /** Which camera the next press uses, in words. */
+    private fun showSource() {
+        val usesBand = when (sourceKind) {
+            FrameSourceKind.AUTO -> bandConnected
+            FrameSourceKind.BAND -> true
+            else -> false
+        }
+        binding.sourceStatus.visibility =
+            if (sourceKind == FrameSourceKind.BUNDLED) View.GONE else View.VISIBLE
+        binding.sourceStatus.setText(if (usesBand) R.string.source_band else R.string.source_phone)
+    }
+
+    /**
+     * Keep [bandConnected] current while the screen is up, and say so when it
+     * changes — a blind user cannot see the status line flip, and whether
+     * distances are coming is the difference that matters to them.
+     */
+    private fun watchForBand() {
+        val app = application as TactileSightApp
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    val now = BandProbe.reachable(app.settings.bandAddress)
+                    if (now != bandConnected) {
+                        bandConnected = now
+                        Log.i(TAG, "band ${if (now) "connected" else "lost"} at ${app.settings.bandAddress}")
+                        showSource()
+                        if (sourceKind == FrameSourceKind.AUTO && !pressIsDown) {
+                            val notice = getString(
+                                if (now) R.string.spoken_band_connected else R.string.spoken_band_lost,
+                            )
+                            try {
+                                speech.speak(notice, app.settings.language)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "could not speak the band notice", e)
+                            }
+                        }
+                    }
+                    delay(BAND_PROBE_INTERVAL_MS)
+                }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_CAMERA) return
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
+        when (sourceKind) {
+            FrameSourceKind.AUTO -> selectSource(FrameSourceKind.AUTO)
+            else -> Unit
+        }
     }
 
     private fun hasCameraPermission(): Boolean =
@@ -1301,6 +1495,9 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_FROM = "from"
         const val REQUEST_MIC = 1001
         const val REQUEST_CAMERA = 1002
+
+        /** Cheap — one TCP connect — and quick enough to notice a band in seconds. */
+        const val BAND_PROBE_INTERVAL_MS = 5_000L
 
         /**
          * Above this, a press is a question rather than a request to describe.

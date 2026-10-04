@@ -19,15 +19,14 @@ fun secret(property: String, environment: String): String =
         .removeSurrounding("\"")
         .removeSurrounding("'")
 
-val sarvamApiKey: String = secret("sarvam.api.key", "SARVAM_API_KEY")
+// `./gradlew assembleDebug -Pshareable=true` builds an APK with **no** keys in
+// it — the one to hand to other people. Anything compiled in can be pulled out
+// of the APK by whoever holds it. Without Sarvam the app still speaks English
+// with the phone's own voice; Indic speech and spoken questions need the key.
+val shareable: Boolean = (findProperty("shareable") as String?)?.toBoolean() == true
 
-// Qualcomm Cloud AI 100, via Cirrascale's Imagine API. Held on the phone so
-// the cloud tier does not depend on our laptop being up and tunnelled — the
-// three destinations must fail independently. It is extractable from the APK
-// by anyone holding it, which is acceptable for an MVP only the team installs
-// and a key rotated after the event, but it is a deliberate trade, not an
-// oversight.
-val cirrascaleApiKey: String = secret("cirrascale.api.key", "CIRRASCALE_API_KEY")
+val sarvamApiKey: String = if (shareable) "" else secret("sarvam.api.key", "SARVAM_API_KEY")
+
 
 android {
     namespace = "com.tactilesight"
@@ -41,7 +40,6 @@ android {
         versionName = "0.1"
 
         buildConfigField("String", "SARVAM_API_KEY", "\"$sarvamApiKey\"")
-        buildConfigField("String", "CIRRASCALE_API_KEY", "\"$cirrascaleApiKey\"")
 
         // QAIRT/Hexagon ships arm64 only; other ABIs would bloat the APK with
         // libs that cannot run the model anyway.

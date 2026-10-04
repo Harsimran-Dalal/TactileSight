@@ -52,6 +52,13 @@ enum class BrainMode(
      */
     ON_DEVICE_NPU("On-device", sendsImageryOffDevice = false),
 
+    /**
+     * A hosted vision model on the user's own API key — the tier that works on
+     * any phone, with no band and nothing sideloaded. The frame goes to a third
+     * party, and the picker says so.
+     */
+    CLOUD_API("Cloud", sendsImageryOffDevice = true),
+
     /** Our own machine — the laptop tier, reached by LAN address or tunnel. */
     PRIVATE_SERVER("Private server", sendsImageryOffDevice = true);
 

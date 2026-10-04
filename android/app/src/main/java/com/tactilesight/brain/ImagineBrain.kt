@@ -2,7 +2,6 @@ package com.tactilesight.brain
 
 import android.util.Base64
 import android.util.Log
-import com.tactilesight.BuildConfig
 import com.tactilesight.core.Answer
 import com.tactilesight.core.Frame
 import com.tactilesight.core.SemanticBrain
@@ -27,11 +26,10 @@ import java.net.URL
  * content — so this is the same wire format as the laptop's llama.cpp server,
  * and the same one `server/backends/openai_compat.py` emits.
  *
- * ⚠️ **The key is compiled into the APK** (from `cirrascale.api.key` in
- * `local.properties`), exactly as the Sarvam key is. Anyone holding the APK can
- * extract it. That is an accepted trade for an MVP only the team installs, with
- * a key rotated after the event — a deliberate decision, not an oversight. Do
- * not ship this to real users unchanged.
+ * Now also the client for [com.tactilesight.core.BrainMode.CLOUD_API]: any
+ * OpenAI-compatible vision endpoint, on a key the **user** types into the app.
+ * The Cirrascale key that used to be compiled in is gone — this APK is handed
+ * to people, and a baked-in key is extractable by every one of them.
  *
  * Uses [VlmPrompt], the same prompt the on-device brain uses, so switching
  * destination does not silently change how the app talks.
@@ -40,7 +38,7 @@ class ImagineBrain(
     private val baseUrl: String,
     private val model: String,
     /** Blank for a local server — LM Studio and llama-server want no auth. */
-    private val apiKey: String = BuildConfig.CIRRASCALE_API_KEY,
+    private val apiKey: String = "",
     private val promptOverride: () -> String? = { null },
     /** What to call this in the UI — the same wire serves two destinations. */
     private val label: String = "Cloud AI 100",
@@ -96,7 +94,7 @@ class ImagineBrain(
 
                 if (connection.responseCode != HttpURLConnection.HTTP_OK) {
                     val detail = connection.errorStream?.bufferedReader()?.readText().orEmpty()
-                    error("Imagine API failed: HTTP ${connection.responseCode} $detail")
+                    error("Vision API failed: HTTP ${connection.responseCode} $detail")
                 }
 
                 val json = JSONObject(connection.inputStream.bufferedReader().readText())

@@ -5,11 +5,20 @@ import android.util.Log
 import com.tactilesight.brain.CloudBrain
 import com.tactilesight.brain.GenieXBrain
 import com.tactilesight.brain.ImagineBrain
+import com.tactilesight.brain.ModelDownloader
 import com.tactilesight.brain.ModelStore
-import com.tactilesight.brain.StubBrain
+import com.tactilesight.brain.NotSetUpBrain
 import com.tactilesight.core.BrainMode
 import com.tactilesight.core.SemanticBrain
 import com.tactilesight.core.Settings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Owns the loaded model for the life of the process.
@@ -30,7 +39,7 @@ class TactileSightApp : Application() {
      * speaks — it just speaks the stub sentence rather than a dead press.
      */
     @Volatile
-    var brain: SemanticBrain = StubBrain()
+    var brain: SemanticBrain = NotSetUpBrain("")
         private set
 
     private val brainLock = Any()
@@ -44,7 +53,7 @@ class TactileSightApp : Application() {
      * The picker knows which engine was *chosen*; only this knows whether it is
      * actually *there*.
      */
-    enum class ModelState { LOADING, READY, FAILED }
+    enum class ModelState { LOADING, READY, FAILED, NOT_SET_UP }
 
     @Volatile
     var modelState: ModelState = ModelState.LOADING
@@ -78,7 +87,11 @@ class TactileSightApp : Application() {
                 Log.i(TAG, "brain changed while ${loading.name} was loading — preparing the new one")
                 continue
             }
-            modelState = if (ready) ModelState.READY else ModelState.FAILED
+            modelState = when {
+                loading is NotSetUpBrain -> ModelState.NOT_SET_UP
+                ready -> ModelState.READY
+                else -> ModelState.FAILED
+            }
             Log.i(TAG, "${loading.name} is $modelState")
             return modelState
         }
@@ -141,6 +154,8 @@ class TactileSightApp : Application() {
     /** Everything that decides which brain we need. Same key, same brain. */
     private fun configurationKey(mode: BrainMode): String = when (mode) {
         BrainMode.ON_DEVICE_NPU -> mode.name
+        BrainMode.CLOUD_API ->
+            "${mode.name}|${settings.cloudApiUrl}|${settings.cloudApiModel}|${settings.cloudApiKey.hashCode()}"
         BrainMode.PRIVATE_SERVER ->
             "${mode.name}|${settings.privateServerUrl}|${settings.privateServerIsOpenAi}|" +
                 settings.privateServerModel
@@ -157,6 +172,8 @@ class TactileSightApp : Application() {
         BrainMode.ON_DEVICE_NPU -> localBrain
             ?: onDeviceBrain(ModelStore.Engine.GENIEX).also { localBrain = it }
 
+        BrainMode.CLOUD_API -> cloudBrain()
+
         // Our own machine. Two kinds of server land here and they speak
         // different wires, so the Check button probes and remembers which:
         //   server/app.py  -> POST /v1/describe   (the frozen contract)
@@ -167,8 +184,8 @@ class TactileSightApp : Application() {
             val url = settings.privateServerUrl
             when {
                 url.isBlank() -> {
-                    Log.w(TAG, "no URL set for $mode — falling back to the stub brain")
-                    StubBrain()
+                    Log.w(TAG, "no URL set for $mode")
+                    NotSetUpBrain(getString(R.string.speak_no_server))
                 }
 
                 settings.privateServerIsOpenAi -> ImagineBrain(
@@ -184,6 +201,25 @@ class TactileSightApp : Application() {
                 else -> CloudBrain(baseUrl = url, name = mode.displayName)
             }
         }
+    }
+
+    /**
+     * The user's own hosted model. Same wire as the laptop's LM Studio path —
+     * OpenAI `chat/completions` with an `image_url` — so the same client.
+     */
+    private fun cloudBrain(): SemanticBrain {
+        val key = settings.cloudApiKey
+        if (key.isBlank() || settings.cloudApiUrl.isBlank()) {
+            Log.w(TAG, "cloud chosen with no key or URL")
+            return NotSetUpBrain(getString(R.string.speak_no_key))
+        }
+        return ImagineBrain(
+            baseUrl = settings.cloudApiUrl,
+            model = settings.cloudApiModel,
+            apiKey = key,
+            promptOverride = { settings.customPrompt },
+            label = BrainMode.CLOUD_API.displayName,
+        )
     }
 
     /**
@@ -203,9 +239,9 @@ class TactileSightApp : Application() {
                 TAG,
                 "no model in " +
                     order.joinToString { modelStore.directoryFor(it).path } +
-                    " — falling back to the stub brain",
+                    " — nothing to describe with",
             )
-            return StubBrain()
+            return NotSetUpBrain(getString(R.string.speak_no_model))
         }
 
         if (engine != preferred) {
@@ -261,6 +297,59 @@ class TactileSightApp : Application() {
                 Log.i(TAG, "released the parked ${parked.name}")
             }
         }
+    }
+
+    /**
+     * The downloadable fallback model. App-scoped, like the brain: a download
+     * of a gigabyte and a half must survive the Activity rotating under it.
+     */
+    val downloader by lazy {
+        ModelDownloader(modelStore.directoryFor(ModelStore.Engine.GENIEX_GGUF))
+    }
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * Bumped when the on-device brain is rebuilt behind the screen's back — a
+     * download finishing. The screen collects it to re-attach its token
+     * listener and redraw the status; it has no other way to learn the brain
+     * object changed.
+     */
+    private val _brainRebuilt = MutableStateFlow(0)
+    val brainRebuilt: StateFlow<Int> = _brainRebuilt.asStateFlow()
+    private var downloadJob: Job? = null
+
+    /** Whether any on-device model — sideloaded or downloaded — is staged. */
+    fun hasOnDeviceModel(): Boolean =
+        ENGINE_PREFERENCE.any { modelStore.available(it).isNotEmpty() }
+
+    /**
+     * Start (or resume) the model download; when it lands, swap the empty
+     * on-device brain for the real one. Idempotent while one is running.
+     */
+    fun downloadModel() {
+        if (downloadJob?.isActive == true) return
+        downloadJob = appScope.launch {
+            if (downloader.download()) refreshOnDeviceModel()
+        }
+    }
+
+    /**
+     * Rebuild the on-device brain because what is staged changed. This is the
+     * "model itself changes" case the one-model rule allows a release for.
+     */
+    private suspend fun refreshOnDeviceModel() {
+        synchronized(brainLock) {
+            val parked = localBrain
+            localBrain = null
+            if (parked != null && parked !== brain) parked.close()
+        }
+        if (settings.mode == BrainMode.ON_DEVICE_NPU) {
+            loadedConfiguration = null
+            applyMode(BrainMode.ON_DEVICE_NPU)
+            prepareBrain()
+        }
+        _brainRebuilt.value += 1
     }
 
     private companion object {

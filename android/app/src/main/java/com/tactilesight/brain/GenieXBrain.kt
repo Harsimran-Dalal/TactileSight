@@ -74,10 +74,19 @@ class GenieXBrain(
      * ggml's OpenCL backend, which is where our fastest measured numbers came
      * from (71 tok/s prefill on Gemma-4-E4B).
      */
-    private val computeUnit: ComputeUnitValue = computeUnit
+    @Volatile
+    private var computeUnit: ComputeUnitValue = computeUnit
         ?: if (this.runtime == RuntimeIdValue.QAIRT) ComputeUnitValue.NPU else ComputeUnitValue.GPU
 
-    override val name: String = "GenieX (${this.runtime.value}/${this.computeUnit.value})"
+    /**
+     * Whether a failed GPU load may retry on the CPU. Only when the caller left
+     * the unit to us: a forced unit is a measurement (#2) and must fail loudly
+     * rather than quietly report a different one.
+     */
+    private val mayFallBackToCpu = computeUnit == null && this.runtime == RuntimeIdValue.LLAMA_CPP
+
+    override val name: String
+        get() = "GenieX (${runtime.value}/${computeUnit.value})"
 
     /** Gigabytes of mapped weights — the thing the one-model rule is about. */
     override val holdsModel: Boolean = true
@@ -308,53 +317,67 @@ class GenieXBrain(
                 "no GenieX model at ${modelDir.absolutePath} — sideload one, see ModelStore"
             }
 
-            Log.i(TAG, "loading ${bundle.name} on ${runtime.value}/${computeUnit.value}")
             val started = System.currentTimeMillis()
 
-            val created = VlmWrapper.builder()
-                .vlmCreateInput(
-                    VlmCreateInput(
-                        bundle.name,
-                        modelPathFor(bundle),
-                        mmprojPathIn(bundle),
-                        // Positional, because verbose has no setter — and its
-                        // native logging is the only way to see why creation
-                        // fails; the JNI layer surfaces bare error codes.
-                        // n_ctx must be 0 on QAIRT: the bundle's context is
-                        // compiled in (4096) and the plugin rejects any value,
-                        // including the SDK default —
-                        //   "--nctx (n_ctx) is not supported by the qairt plugin"
-                        ModelConfig(
-                            /* nCtx = */ if (runtime == RuntimeIdValue.LLAMA_CPP) CONTEXT_TOKENS else 0,
-                            /* nThreads = */ 8,
-                            /* nThreadsBatch = */ 8,
-                            /* nBatch = */ 2048,
-                            /* nUBatch = */ 512,
-                            /* nSeqMax = */ 1,
-                            // llama_cpp offloads nothing unless told how many
-                            // layers to move; 0 would run on CPU while still
-                            // reporting "gpu", which is exactly the kind of
-                            // silent lie #2's benchmark exists to catch. QAIRT
-                            // ignores this — its placement is compiled in.
-                            /* nGpuLayers = */ if (runtime == RuntimeIdValue.LLAMA_CPP) ALL_LAYERS else 0,
-                            /* chatTemplatePath = */ "",
-                            /* chatTemplateContent = */ "",
-                            /* maxTokens = */ 2048,
-                            /* enableThinking = */ false,
-                            /* verbose = */ true,
-                        ),
-                        runtime.value,
-                        computeUnit.value,
-                    ),
-                )
-                .dispatcher(Dispatchers.IO)
-                .build()
-                .getOrThrow()
+            // A downloaded GGUF lands on phones we have never held. ggml's GPU
+            // backend targets Adreno; on anything else the GPU load fails, and
+            // a slow CPU answer beats no answer at all (hard rule #4).
+            val created = try {
+                create(bundle)
+            } catch (e: Exception) {
+                if (!mayFallBackToCpu || computeUnit == ComputeUnitValue.CPU) throw e
+                Log.w(TAG, "load on ${computeUnit.value} failed — retrying on cpu", e)
+                computeUnit = ComputeUnitValue.CPU
+                create(bundle)
+            }
 
             Log.i(TAG, "loaded in ${System.currentTimeMillis() - started}ms")
             vlm = created
             created
         }
+    }
+
+    private suspend fun create(bundle: File): VlmWrapper {
+        Log.i(TAG, "loading ${bundle.name} on ${runtime.value}/${computeUnit.value}")
+        return VlmWrapper.builder()
+            .vlmCreateInput(
+                VlmCreateInput(
+                    bundle.name,
+                    modelPathFor(bundle),
+                    mmprojPathIn(bundle),
+                    // Positional, because verbose has no setter — and its
+                    // native logging is the only way to see why creation
+                    // fails; the JNI layer surfaces bare error codes.
+                    // n_ctx must be 0 on QAIRT: the bundle's context is
+                    // compiled in (4096) and the plugin rejects any value,
+                    // including the SDK default —
+                    //   "--nctx (n_ctx) is not supported by the qairt plugin"
+                    ModelConfig(
+                        /* nCtx = */ if (runtime == RuntimeIdValue.LLAMA_CPP) CONTEXT_TOKENS else 0,
+                        /* nThreads = */ 8,
+                        /* nThreadsBatch = */ 8,
+                        /* nBatch = */ 2048,
+                        /* nUBatch = */ 512,
+                        /* nSeqMax = */ 1,
+                        // llama_cpp offloads nothing unless told how many
+                        // layers to move; 0 would run on CPU while still
+                        // reporting "gpu", which is exactly the kind of
+                        // silent lie #2's benchmark exists to catch. QAIRT
+                        // ignores this — its placement is compiled in.
+                        /* nGpuLayers = */ if (runtime == RuntimeIdValue.LLAMA_CPP && computeUnit != ComputeUnitValue.CPU) ALL_LAYERS else 0,
+                        /* chatTemplatePath = */ "",
+                        /* chatTemplateContent = */ "",
+                        /* maxTokens = */ 2048,
+                        /* enableThinking = */ false,
+                        /* verbose = */ true,
+                    ),
+                    runtime.value,
+                    computeUnit.value,
+                ),
+            )
+            .dispatcher(Dispatchers.IO)
+            .build()
+            .getOrThrow()
     }
 
     /**
